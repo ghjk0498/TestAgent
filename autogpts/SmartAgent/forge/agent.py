@@ -126,10 +126,12 @@ class ForgeAgent(Agent):
 
         # Firstly we get the task this step is for so we can access the task input
         task = await self.db.get_task(task_id)
+        LOG.info(f"Task : " + pprint.pformat(task))
 
         step = await self.db.create_step(
             task_id=task_id, input=step_request, is_last=True
         )
+        LOG.info(f"Step : " + pprint.pformat(step))
 
         # Log the message
         # LOG.info(f"\t✅ Final Step completed: {step.step_id} input: {step.input[:19]}")
@@ -138,11 +140,12 @@ class ForgeAgent(Agent):
         prompt_engine = PromptEngine("gpt-3.5-turbo")
         
         # Load the system and task prompts
-        system_prompt = prompt_engine.load_prompt("system-format")
+        system_prompt = prompt_engine.load_prompt("custom-system-format")
 
         previous_actions = []
+        previous_action_error = None
         exist_ability = True
-        count = 3
+        count = 2
         while exist_ability:
             # Initialize the messages list with the system prompt
             messages = [
@@ -152,11 +155,13 @@ class ForgeAgent(Agent):
             task_kwargs = {
                 "task": task.input,
                 "abilities": self.abilities.list_abilities_for_prompt(),
-                "previous_actions": previous_actions
+                "previous_actions": previous_actions,
+                "previous_action_error": previous_action_error
             }
+            LOG.info(f"Task_Kwargs : " + pprint.pformat(task_kwargs))
 
             # Load the task prompt with the defined task parameters
-            task_prompt = prompt_engine.load_prompt("task-step", **task_kwargs)
+            task_prompt = prompt_engine.load_prompt("custom-task-step", **task_kwargs)
 
             # Append the task prompt to the messages list
             messages.append({"role": "user", "content": task_prompt})
@@ -172,7 +177,7 @@ class ForgeAgent(Agent):
                 answer = json.loads(chat_response["choices"][0]["message"]["content"])
 
                 # Log the answer for debugging purposes
-                LOG.info(pprint.pformat(answer))
+                LOG.info(f"Answer : " + pprint.pformat(answer))
 
             except json.JSONDecodeError as e:
                 # Handle JSON decoding errors
@@ -181,15 +186,24 @@ class ForgeAgent(Agent):
                 # Handle other exceptions
                 LOG.error(f"Unable to generate chat response: {e}")
 
+            # Set the step output to the "speak" part of the answer
+            step.output = answer["thoughts"]["speak"]
+
             try:
                 # Extract the ability from the answer
                 ability = answer["ability"]
-                
+
                 # Run the ability and get the output
                 # We don't actually use the output in this example
                 output = await self.abilities.run_ability(
                     task_id, ability["name"], **ability["args"]
                 )
+                LOG.info("Run_Ability Output : " + pprint.pformat(output))
+                self.ability_output_check(ability, output)
+
+                if ability["name"] == "finish":
+                    step.output = output
+                    break
 
                 ability["result"] = output
                 previous_actions.append(ability)
@@ -197,15 +211,18 @@ class ForgeAgent(Agent):
                 await self.db.create_step(
                     task_id=task_id, input=StepRequestBody(), is_last=True
                 )
+            except FileNotFoundError as e:
+                previous_action_error = e
+                previous_actions.append(ability)
             except Exception as e:
                 exist_ability = False
+                LOG.error(f"Unable to generate chat response: {e}")
             count -= 1
             if count <= 0:
                 break
 
         
-        # Set the step output to the "speak" part of the answer
-        step.output = answer["thoughts"]["speak"]
+        
 
         # await self.db.create_step(
         #     task_id=task_id, input=StepRequestBody(), is_last=True
@@ -213,3 +230,8 @@ class ForgeAgent(Agent):
 
         # Return the completed step
         return step
+
+    def ability_output_check(self, ability, output):
+        if ability["name"] == "list":
+            if len(output) == 0:
+                raise FileNotFoundError
